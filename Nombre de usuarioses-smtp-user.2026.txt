@@ -1,6 +1,1 @@
-Nombre de usuario:ses-smtp-user.20260106-073230
-Credenciales de SMTP
 
-Nombre de usuario de IAM:ses-smtp-user.20260106-073230
-Nombre de usuario de SMTP:AKIAQBMSZPR256BSD6BP
-Contraseña de SMTP:BPfe5IgnXH1NL8EDzuuGs61Qn/dqLhmXLK397yRv7NQc
