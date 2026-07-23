@@ -1,9 +1,51 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+// Lote por invocación. Al reutilizar una sola conexión SMTP cada correo tarda
+// ~100ms en vez de ~1-2s (antes se abría una conexión TLS nueva por correo),
+// así que podemos procesar más por invocación sin acercarnos al límite de tiempo.
+const BATCH_SIZE = 150;
+
+// Pausa entre correos (SES admite ~14/seg). 80ms => ~12/seg, con margen.
+const SEND_DELAY_MS = 80;
+
+// Si fallan muchos correos seguidos es un problema sistémico (credenciales,
+// SES caído, límite excedido). Abortamos el lote y dejamos el resto PENDIENTE
+// en vez de marcarlos como fallidos, para poder reintentar después.
+const MAX_CONSECUTIVE_FAILURES = 10;
+
+const SMTP_FROM = "Simulador Concurso Docente - Fundales <concursodocente@fundales.com>";
+
+// Reintentos por correo ante errores TRANSITORIOS (rate limit, timeouts...).
+const MAX_ATTEMPTS = 3;
+
+// Formato mínimo válido: algo@algo.tld  (descarta casos como "user@hotmailcom").
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+
+// Errores que vale la pena reintentar (el problema es temporal, no el destinatario).
+const TRANSIENT_RE = /rate ?limit|throttl|too many|timeout|timed out|econnreset|epipe|connection closed|temporarily|try again|service unavailable|\b4\.[0-9]\.[0-9]\b|\b421\b|\b451\b|\b452\b/i;
+
+/** Convierte un error (a veces JSON con stack) en un mensaje corto y legible. */
+function cleanErrorMessage(err: unknown): string {
+    let msg = err instanceof Error ? err.message : String(err);
+    const jsonStart = msg.indexOf('{');
+    if (jsonStart !== -1) {
+        try {
+            const parsed = JSON.parse(msg.slice(jsonStart));
+            if (parsed?.error) msg = String(parsed.error);
+        } catch { /* no era JSON, seguimos con el texto original */ }
+    }
+    // Cortar el stack trace
+    msg = msg.split('\n    at ')[0].split('\n at ')[0].split('\\n at ')[0].trim();
+    return msg.slice(0, 300);
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 Deno.serve(async (req) => {
     // Debug log to confirm execution start
@@ -41,63 +83,117 @@ Deno.serve(async (req) => {
             .select('*')
             .eq('campaign_id', campaignId)
             .eq('status', 'pending')
-            .limit(50); // Lotes de 50 para no saturar SES
+            .limit(BATCH_SIZE);
 
         if (recipientsError) throw recipientsError;
         console.log(`Found ${recipients?.length || 0} pending recipients`);
 
-        // 3. Enviar emails usando Edge Function helper
+        // 3. Enviar los correos reutilizando UNA sola conexión SMTP para todo el lote.
         let successCount = 0;
         let failCount = 0;
+        let consecutiveFailures = 0;
+        let abortedReason: string | null = null;
 
-        for (const recipient of recipients || []) {
-            try {
-                // Llamar a send-email-ses helper function
-                // USAMOS SERVICE_ROLE_KEY para asegurar que la llamada interna tenga permisos
-                const response = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-email-ses`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`
-                    },
-                    body: JSON.stringify({
-                        to: recipient.email,
-                        subject: campaign.subject,
-                        html: addUnsubscribeFooter(campaign.html_content, recipient.user_id),
-                        text: campaign.plain_text_content || stripHtml(campaign.html_content)
-                    })
-                });
+        const username = Deno.env.get('AWS_SES_USERNAME');
+        const password = Deno.env.get('AWS_SES_PASSWORD');
+        if (!username || !password) {
+            throw new Error('Credenciales AWS SES no configuradas (AWS_SES_USERNAME / AWS_SES_PASSWORD)');
+        }
 
-                if (!response.ok) {
-                    const error = await response.text();
-                    throw new Error(error);
+        let smtp: SMTPClient | null = null;
+        if ((recipients || []).length > 0) {
+            // NOTA: sin la opción `pool`. denomailer ya mantiene viva la conexión
+            // entre llamadas a send(), que es justo la reutilización que buscamos.
+            // Activar `pool` rompía TODOS los envíos en el edge runtime.
+            // Esta es exactamente la misma configuración que usa send-email-ses,
+            // que está probada y funciona.
+            smtp = new SMTPClient({
+                connection: {
+                    hostname: "email-smtp.us-east-1.amazonaws.com",
+                    port: 465,
+                    tls: true,
+                    auth: { username, password },
+                },
+            });
+        }
+
+        // Fallback obligatorio: denomailer rechaza el correo si `content` va vacío.
+        const plainText =
+            (campaign.plain_text_content || '').trim() ||
+            stripHtml(campaign.html_content || '').trim() ||
+            'Contenido del correo';
+
+        try {
+            for (const recipient of recipients || []) {
+                // (a) Validar el formato ANTES de gastar un envío. Un correo mal
+                //     escrito (ej. "user@hotmailcom") nunca se podrá entregar.
+                if (!recipient.email || !EMAIL_RE.test(recipient.email.trim())) {
+                    await supabase
+                        .from('email_recipients')
+                        .update({
+                            status: 'failed',
+                            error_message: `Formato de correo inválido: "${recipient.email}". Corrige el dato del usuario.`
+                        })
+                        .eq('id', recipient.id);
+                    failCount++;
+                    continue; // No es un fallo del sistema: no toca el cortacircuitos.
                 }
 
-                // Actualizar estado
-                await supabase
-                    .from('email_recipients')
-                    .update({
-                        status: 'sent',
-                        sent_at: new Date().toISOString()
-                    })
-                    .eq('id', recipient.id);
+                // (b) Enviar, reintentando si el error es transitorio.
+                let delivered = false;
+                let lastError = '';
 
-                successCount++;
+                for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+                    try {
+                        await smtp!.send({
+                            from: SMTP_FROM,
+                            to: recipient.email.trim(),
+                            subject: campaign.subject,
+                            content: plainText,
+                            html: addUnsubscribeFooter(campaign.html_content, recipient.user_id),
+                        });
+                        delivered = true;
+                        break;
+                    } catch (emailError) {
+                        lastError = cleanErrorMessage(emailError);
+                        const transient = TRANSIENT_RE.test(lastError);
+                        console.error(`Intento ${attempt}/${MAX_ATTEMPTS} falló para ${recipient.email}: ${lastError}`);
+                        if (!transient || attempt === MAX_ATTEMPTS) break;
+                        // Espera creciente: 2s, 5s
+                        await sleep(attempt === 1 ? 2000 : 5000);
+                    }
+                }
 
-                // Rate limiting: ~14 emails/segundo máximo en SES
-                await new Promise(resolve => setTimeout(resolve, 80));
+                if (delivered) {
+                    await supabase
+                        .from('email_recipients')
+                        .update({ status: 'sent', sent_at: new Date().toISOString(), error_message: null })
+                        .eq('id', recipient.id);
+                    successCount++;
+                    consecutiveFailures = 0;
+                    await sleep(SEND_DELAY_MS);
+                } else {
+                    await supabase
+                        .from('email_recipients')
+                        .update({ status: 'failed', error_message: lastError })
+                        .eq('id', recipient.id);
+                    failCount++;
+                    consecutiveFailures++;
 
-            } catch (emailError) {
-                await supabase
-                    .from('email_recipients')
-                    .update({
-                        status: 'failed',
-                        error_message: String(emailError)
-                    })
-                    .eq('id', recipient.id);
-
-                failCount++;
+                    // Cortacircuitos: ante un fallo sistémico dejamos el resto PENDIENTE.
+                    // Si TODAVÍA no se ha enviado ninguno con éxito, el problema es
+                    // de configuración/conexión: cortamos a los 3 para no quemar
+                    // destinatarios marcándolos como fallidos sin motivo real.
+                    const threshold = successCount === 0 ? 3 : MAX_CONSECUTIVE_FAILURES;
+                    if (consecutiveFailures >= threshold) {
+                        abortedReason = `Abortado tras ${consecutiveFailures} fallos consecutivos${successCount === 0 ? ' sin ningún envío exitoso' : ''}: ${lastError.slice(0, 200)}`;
+                        console.error(abortedReason);
+                        break;
+                    }
+                }
             }
+        } finally {
+            try { await smtp?.close(); } catch (e) { console.warn('Error cerrando SMTP:', e); }
         }
 
         // 4. Actualizar estadísticas de campaña desde la FUENTE DE VERDAD (email_recipients)
@@ -133,9 +229,10 @@ Deno.serve(async (req) => {
 
         console.log(`Campaign ${campaignId} reconciled: sent=${sentTotal}, failed=${failedTotal}, pending=${pendingTotal}, status=${newStatus}`);
 
-        // 5. RECURSIVIDAD: si aún quedan destinatarios pendientes, invocar el siguiente lote.
-        if (pendingTotal > 0) {
-            console.log(`Lote de 50 completado. Invocando siguiente lote para campaña ${campaignId}...`);
+        // 5. RECURSIVIDAD: si aún quedan pendientes (y no abortamos por fallo
+        //    sistémico), invocar automáticamente el siguiente lote.
+        if (pendingTotal > 0 && !abortedReason) {
+            console.log(`Lote de ${BATCH_SIZE} completado. Invocando siguiente lote para campaña ${campaignId}...`);
 
             const cleanUrl = Deno.env.get('SUPABASE_URL')?.replace(/\/$/, '');
             const recursiveUrl = `${cleanUrl}/functions/v1/send-campaign`;
@@ -178,7 +275,8 @@ Deno.serve(async (req) => {
                 failed_total: failedTotal,
                 pending_total: pendingTotal,
                 status: newStatus,
-                more_pending: pendingTotal > 0
+                more_pending: pendingTotal > 0,
+                aborted: abortedReason
             }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
