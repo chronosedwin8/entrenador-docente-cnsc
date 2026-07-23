@@ -5,6 +5,10 @@ import { UserProfile, UserRole, SystemRole, SubscriptionTier, KnowledgeArea, Lea
 import { settingsService, PlanConfigs, InterviewPricingConfig, PlanConfig, MaintenanceConfig, InfoBarConfig } from '../services/settingsService';
 import { UserDetailModal } from './UserDetailModal';
 import { EmailCampaignTab } from './EmailCampaignTab';
+import { UserConfirmationTab } from './UserConfirmationTab';
+import { RevenueTab } from './RevenueTab';
+import { ExpandableChart } from './ChartModal';
+import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend } from 'recharts';
 import { BulkUserDeletionModal } from './BulkUserDeletionModal';
 import { interviewService } from '../services/interviewService';
 
@@ -15,7 +19,7 @@ interface AdminPanelProps {
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, onHistoryReset }) => {
-    const [activeTab, setActiveTab] = useState<'users' | 'videos' | 'help-videos' | 'email-campaigns' | 'config'>('users');
+    const [activeTab, setActiveTab] = useState<'users' | 'revenue' | 'confirmations' | 'videos' | 'help-videos' | 'email-campaigns' | 'config'>('users');
     const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
 
     // Config State
@@ -33,6 +37,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
     const [users, setUsers] = useState<UserProfile[]>([]);
     const [loadingUsers, setLoadingUsers] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
+    const [planFilter, setPlanFilter] = useState<'all' | 'free' | 'premium'>('all');
     const [currentPage, setCurrentPage] = useState(1);
     const [usersPerPage] = useState(10);
     const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
@@ -71,27 +76,52 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
         if (activeTab === 'config') fetchConfig();
     }, [activeTab]);
 
-    // Reset to page 1 when search changes
+    // Reset to page 1 when search or plan filter changes
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchTerm]);
+    }, [searchTerm, planFilter]);
 
     const fetchUsers = async () => {
         // ... (fetchUsers implementation omitted for brevity, assuming standard fetch logic) ...
         setLoadingUsers(true);
         try {
-            // 1. Fetch Profiles
-            const { data: profiles, error: profileError } = await supabase
-                .from('profiles')
-                .select('*')
-                .order('created_at', { ascending: false });
+            // 1. Fetch ALL Profiles in pages (Supabase default cap is 1000 rows per query)
+            const PAGE_SIZE = 1000;
+            let allProfiles: any[] = [];
+            let from = 0;
+            while (true) {
+                const { data: page, error: pageError } = await supabase
+                    .from('profiles')
+                    .select('*')
+                    .order('created_at', { ascending: false })
+                    .range(from, from + PAGE_SIZE - 1);
+                if (pageError) throw pageError;
+                if (!page || page.length === 0) break;
+                allProfiles = allProfiles.concat(page);
+                if (page.length < PAGE_SIZE) break;
+                from += PAGE_SIZE;
+            }
+            const profiles = allProfiles;
+            const profileError = null;
 
             if (profileError) throw profileError;
 
-            // 2. Fetch Simulation Data (user_id only) to categorize by tier
-            const { data: simulations, error: simError } = await supabase
-                .from('simulations')
-                .select('user_id');
+            // 2. Fetch Simulation Data (user_id only) — paginated for the same reason
+            let allSims: any[] = [];
+            from = 0;
+            while (true) {
+                const { data: simPage, error: simPageError } = await supabase
+                    .from('simulations')
+                    .select('user_id')
+                    .range(from, from + PAGE_SIZE - 1);
+                if (simPageError) throw simPageError;
+                if (!simPage || simPage.length === 0) break;
+                allSims = allSims.concat(simPage);
+                if (simPage.length < PAGE_SIZE) break;
+                from += PAGE_SIZE;
+            }
+            const simulations = allSims;
+            const simError = null;
 
             if (simError) throw simError;
 
@@ -575,11 +605,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
     };
 
     // Filtering and Pagination
-    const filteredUsers = users.filter(u =>
-        u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        u.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        u.role.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const filteredUsers = users.filter(u => {
+        const matchesSearch =
+            u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            u.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            u.role.toLowerCase().includes(searchTerm.toLowerCase());
+        const matchesPlan =
+            planFilter === 'all' ||
+            (planFilter === 'premium' && u.subscription_tier === 'premium') ||
+            (planFilter === 'free' && u.subscription_tier !== 'premium');
+        return matchesSearch && matchesPlan;
+    });
 
     const indexOfLastUser = currentPage * usersPerPage;
     const indexOfFirstUser = indexOfLastUser - usersPerPage;
@@ -623,6 +659,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
                     className={`pb-2 px-4 font-bold text-sm transition-all border-b-2 ${activeTab === 'users' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
                 >
                     Usuarios y Métricas
+                </button>
+                <button
+                    onClick={() => setActiveTab('revenue')}
+                    className={`pb-2 px-4 font-bold text-sm transition-all border-b-2 ${activeTab === 'revenue' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                >
+                    💰 Ingresos
+                </button>
+                <button
+                    onClick={() => setActiveTab('confirmations')}
+                    className={`pb-2 px-4 font-bold text-sm transition-all border-b-2 ${activeTab === 'confirmations' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                >
+                    ✉️ Confirmar Usuarios
                 </button>
                 <button
                     onClick={() => setActiveTab('videos')}
@@ -686,67 +734,149 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
                                 </div>
 
                                 {/* Role Distribution Chart */}
-                                <div className="bg-white p-6 rounded-xl border border-border-light shadow-sm">
-                                    <h3 className="text-slate-500 font-bold text-sm uppercase mb-3">Distribución por Rol</h3>
-                                    <div className="flex flex-col gap-2">
-                                        {Object.entries(stats.byRole).map(([role, counts]) => {
-                                            const typedCounts = counts as { total: number; free: number; premium: number };
-                                            const percentage = (typedCounts.total / maxRoleCount) * 100;
-                                            return (
-                                                <div key={role} className="flex items-center gap-2">
-                                                    <div className="w-20 text-[10px] text-slate-600 truncate" title={role}>
-                                                        {role.replace('Docente ', '').replace('de ', '')}
-                                                    </div>
-                                                    <div className="flex-1 h-4 bg-slate-100 rounded-full overflow-hidden">
-                                                        <div
-                                                            className="h-full bg-gradient-to-r from-primary to-blue-400 rounded-full transition-all"
-                                                            style={{ width: `${percentage}%` }}
-                                                        />
-                                                    </div>
-                                                    <span className="text-xs font-bold text-slate-700 w-6 text-right">{typedCounts.total}</span>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-
-                                {/* Area Distribution Chart (Docentes de Aula) */}
-                                <div className="bg-white p-6 rounded-xl border border-border-light shadow-sm overflow-hidden">
-                                    <h3 className="text-slate-500 font-bold text-sm uppercase mb-3">Docentes por Área</h3>
-                                    <div className="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
-                                        {Object.entries(stats.byArea).length === 0 ? (
-                                            <p className="text-xs text-slate-400">Sin docentes de aula registrados</p>
-                                        ) : (
-                                            Object.entries(stats.byArea)
-                                                .sort(([, a], [, b]) => (b as number) - (a as number))
-                                                .map(([area, count]) => {
-                                                    const countNum = count as number;
-                                                    const percentage = (countNum / maxAreaCount) * 100;
-                                                    const shortArea = area.split(' - ').pop() || area;
+                                <ExpandableChart
+                                    title="Distribución por Rol"
+                                    className="!p-6"
+                                    chart={(h) => {
+                                        const big = h > 300;
+                                        return (
+                                            <div className={`flex flex-col ${big ? 'gap-3' : 'gap-2'} ${big ? 'overflow-y-auto' : ''}`} style={big ? { maxHeight: h } : undefined}>
+                                                {Object.entries(stats.byRole).map(([role, counts]) => {
+                                                    const typedCounts = counts as { total: number; free: number; premium: number };
+                                                    const percentage = (typedCounts.total / maxRoleCount) * 100;
                                                     return (
-                                                        <div key={area} className="flex items-center gap-2">
-                                                            <div className="w-16 text-[9px] text-slate-600 truncate" title={area}>
-                                                                {shortArea}
+                                                        <div key={role} className="flex items-center gap-3">
+                                                            <div className={`${big ? 'w-52 text-sm' : 'w-20 text-[10px]'} text-slate-600 truncate`} title={role}>
+                                                                {big ? role : role.replace('Docente ', '').replace('de ', '')}
                                                             </div>
-                                                            <div className="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden">
+                                                            <div className={`flex-1 ${big ? 'h-6' : 'h-4'} bg-slate-100 rounded-full overflow-hidden`}>
                                                                 <div
-                                                                    className="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all"
+                                                                    className="h-full bg-gradient-to-r from-primary to-blue-400 rounded-full transition-all"
                                                                     style={{ width: `${percentage}%` }}
                                                                 />
                                                             </div>
-                                                            <span className="text-[10px] font-bold text-slate-700 w-4 text-right">{countNum}</span>
+                                                            <span className={`font-bold text-slate-700 text-right ${big ? 'text-base w-10' : 'text-xs w-6'}`}>{typedCounts.total}</span>
                                                         </div>
                                                     );
-                                                })
-                                        )}
-                                    </div>
-                                </div>
+                                                })}
+                                            </div>
+                                        );
+                                    }}
+                                />
+
+                                {/* Area Distribution Chart (Docentes de Aula) */}
+                                <ExpandableChart
+                                    title="Docentes por Área"
+                                    className="!p-6"
+                                    chart={(h) => {
+                                        const big = h > 300;
+                                        const entries = Object.entries(stats.byArea);
+                                        return (
+                                            <div
+                                                className={`flex flex-col ${big ? 'gap-2.5' : 'gap-1.5'} overflow-y-auto`}
+                                                style={{ maxHeight: big ? h : 160 }}
+                                            >
+                                                {entries.length === 0 ? (
+                                                    <p className="text-xs text-slate-400">Sin docentes de aula registrados</p>
+                                                ) : (
+                                                    entries
+                                                        .sort(([, a], [, b]) => (b as number) - (a as number))
+                                                        .map(([area, count]) => {
+                                                            const countNum = count as number;
+                                                            const percentage = (countNum / maxAreaCount) * 100;
+                                                            const shortArea = area.split(' - ').pop() || area;
+                                                            return (
+                                                                <div key={area} className="flex items-center gap-3">
+                                                                    <div className={`${big ? 'w-64 text-sm' : 'w-16 text-[9px]'} text-slate-600 truncate`} title={area}>
+                                                                        {big ? area : shortArea}
+                                                                    </div>
+                                                                    <div className={`flex-1 ${big ? 'h-5' : 'h-3'} bg-slate-100 rounded-full overflow-hidden`}>
+                                                                        <div
+                                                                            className="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all"
+                                                                            style={{ width: `${percentage}%` }}
+                                                                        />
+                                                                    </div>
+                                                                    <span className={`font-bold text-slate-700 text-right ${big ? 'text-base w-8' : 'text-[10px] w-4'}`}>{countNum}</span>
+                                                                </div>
+                                                            );
+                                                        })
+                                                )}
+                                            </div>
+                                        );
+                                    }}
+                                />
+                            </div>
+
+                            {/* Free vs Premium Charts */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                                <ExpandableChart
+                                    title="Usuarios: Free vs Premium"
+                                    subtitle={`${stats.totalUsers} usuarios en total`}
+                                    chart={(h) => {
+                                        const data = [
+                                            { name: 'Premium', value: stats.usersByTier.premium, color: '#f59e0b' },
+                                            { name: 'Free', value: stats.usersByTier.free, color: '#94a3b8' }
+                                        ];
+                                        return (
+                                            <ResponsiveContainer width="100%" height={h}>
+                                                <PieChart>
+                                                    <Pie
+                                                        data={data}
+                                                        dataKey="value"
+                                                        nameKey="name"
+                                                        cx="50%"
+                                                        cy="50%"
+                                                        innerRadius="50%"
+                                                        outerRadius="78%"
+                                                        paddingAngle={2}
+                                                        label={(e: any) => `${e.name}: ${e.value}`}
+                                                    >
+                                                        {data.map((d) => <Cell key={d.name} fill={d.color} />)}
+                                                    </Pie>
+                                                    <Tooltip formatter={(v: number, n: string) => [`${v} usuarios`, n]} />
+                                                    <Legend />
+                                                </PieChart>
+                                            </ResponsiveContainer>
+                                        );
+                                    }}
+                                />
+                                <ExpandableChart
+                                    title="Simulacros: Free vs Premium"
+                                    subtitle={`${stats.totalSimulations} simulacros realizados`}
+                                    chart={(h) => {
+                                        const data = [
+                                            { name: 'Premium', value: stats.simulationsByTier.premium, color: '#3b82f6' },
+                                            { name: 'Free', value: stats.simulationsByTier.free, color: '#cbd5e1' }
+                                        ];
+                                        return (
+                                            <ResponsiveContainer width="100%" height={h}>
+                                                <PieChart>
+                                                    <Pie
+                                                        data={data}
+                                                        dataKey="value"
+                                                        nameKey="name"
+                                                        cx="50%"
+                                                        cy="50%"
+                                                        innerRadius="50%"
+                                                        outerRadius="78%"
+                                                        paddingAngle={2}
+                                                        label={(e: any) => `${e.name}: ${e.value}`}
+                                                    >
+                                                        {data.map((d) => <Cell key={d.name} fill={d.color} />)}
+                                                    </Pie>
+                                                    <Tooltip formatter={(v: number, n: string) => [`${v} simulacros`, n]} />
+                                                    <Legend />
+                                                </PieChart>
+                                            </ResponsiveContainer>
+                                        );
+                                    }}
+                                />
                             </div>
 
                             {/* Users Table */}
                             <div className="bg-white rounded-xl border border-border-light shadow-sm overflow-hidden flex-1 flex flex-col">
-                                <div className="p-4 border-b border-border-light flex gap-4 bg-slate-50 items-center">
-                                    <div className="relative flex-1">
+                                <div className="p-4 border-b border-border-light flex gap-3 bg-slate-50 items-center flex-wrap">
+                                    <div className="relative flex-1 min-w-[200px]">
                                         <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">search</span>
                                         <input
                                             type="text"
@@ -755,6 +885,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
                                             value={searchTerm}
                                             onChange={e => setSearchTerm(e.target.value)}
                                         />
+                                    </div>
+
+                                    {/* Plan Filter */}
+                                    <div className="flex rounded-lg border border-slate-300 overflow-hidden text-sm font-bold">
+                                        {(['all', 'free', 'premium'] as const).map(p => (
+                                            <button
+                                                key={p}
+                                                onClick={() => setPlanFilter(p)}
+                                                className={`px-3 py-2 transition-colors ${
+                                                    planFilter === p
+                                                        ? p === 'premium'
+                                                            ? 'bg-amber-500 text-white'
+                                                            : p === 'free'
+                                                                ? 'bg-slate-600 text-white'
+                                                                : 'bg-primary text-white'
+                                                        : 'bg-white text-slate-500 hover:bg-slate-100'
+                                                }`}
+                                            >
+                                                {p === 'all' ? 'Todos' : p === 'premium' ? '⭐ Premium' : 'Free'}
+                                            </button>
+                                        ))}
                                     </div>
 
                                     {/* Bulk Deletion Button */}
@@ -766,7 +917,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
                                         Eliminación Masiva
                                     </button>
 
-                                    <span className="text-sm text-slate-500">
+                                    <span className="text-sm text-slate-500 whitespace-nowrap">
                                         {filteredUsers.length} usuarios encontrados
                                     </span>
                                 </div>
@@ -1099,6 +1250,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose, on
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* REVENUE TAB */}
+            {activeTab === 'revenue' && (
+                <RevenueTab />
+            )}
+
+            {/* USER CONFIRMATION TAB */}
+            {activeTab === 'confirmations' && (
+                <UserConfirmationTab />
             )}
 
             {/* EMAIL CAMPAIGNS TAB */}

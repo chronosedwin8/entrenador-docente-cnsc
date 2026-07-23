@@ -100,19 +100,41 @@ Deno.serve(async (req) => {
             }
         }
 
-        // 4. Actualizar estadísticas de campaña
+        // 4. Actualizar estadísticas de campaña desde la FUENTE DE VERDAD (email_recipients)
+        //    en lugar de incrementar contadores (que pueden desfasarse). Esto hace la
+        //    función idempotente y auto-reparable: si un lote se re-ejecuta, los números
+        //    siempre reflejan el estado real de la tabla de destinatarios.
+        const countByStatus = async (status: string | string[]): Promise<number> => {
+            let q = supabase
+                .from('email_recipients')
+                .select('id', { count: 'exact', head: true })
+                .eq('campaign_id', campaignId);
+            q = Array.isArray(status) ? q.in('status', status) : q.eq('status', status);
+            const { count } = await q;
+            return count || 0;
+        };
+
+        const sentTotal = await countByStatus('sent');
+        const failedTotal = await countByStatus(['failed', 'bounced']);
+        const pendingTotal = await countByStatus('pending');
+
+        // Estado real: si no quedan pendientes -> 'sent'; si quedan y ya hubo envíos -> 'sending'.
+        const newStatus = pendingTotal === 0 ? 'sent' : 'sending';
+
         await supabase
             .from('email_campaigns')
             .update({
-                successful_sends: campaign.successful_sends + successCount,
-                failed_sends: campaign.failed_sends + failCount,
-                status: (recipients || []).length < 50 ? 'sent' : 'sending',
+                successful_sends: sentTotal,
+                failed_sends: failedTotal,
+                status: newStatus,
                 sent_at: new Date().toISOString()
             })
             .eq('id', campaignId);
 
-        // 5. RECURSIVIDAD: Si procesamos un lote completo (50), invocar el siguiente lote automáticamente
-        if ((recipients || []).length === 50) {
+        console.log(`Campaign ${campaignId} reconciled: sent=${sentTotal}, failed=${failedTotal}, pending=${pendingTotal}, status=${newStatus}`);
+
+        // 5. RECURSIVIDAD: si aún quedan destinatarios pendientes, invocar el siguiente lote.
+        if (pendingTotal > 0) {
             console.log(`Lote de 50 completado. Invocando siguiente lote para campaña ${campaignId}...`);
 
             const cleanUrl = Deno.env.get('SUPABASE_URL')?.replace(/\/$/, '');
@@ -150,9 +172,13 @@ Deno.serve(async (req) => {
         return new Response(
             JSON.stringify({
                 success: true,
-                sent: successCount,
-                failed: failCount,
-                more_pending: (recipients || []).length === 50
+                sent_this_batch: successCount,
+                failed_this_batch: failCount,
+                successful_total: sentTotal,
+                failed_total: failedTotal,
+                pending_total: pendingTotal,
+                status: newStatus,
+                more_pending: pendingTotal > 0
             }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

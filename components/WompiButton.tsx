@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { supabase } from '../services/supabase';
 import toast from 'react-hot-toast';
 
-// Declare Wompi's WidgetCheckout as global
 declare global {
     interface Window {
         WidgetCheckout: any;
@@ -11,11 +10,29 @@ declare global {
 
 interface WompiButtonProps {
     planName: 'basico' | 'intermedio' | 'avanzado';
-    finalPriceCOP: number; // Final price in COP (not cents)
+    finalPriceCOP: number;
     userId: string;
     includesInterview?: boolean;
     className?: string;
     children?: React.ReactNode;
+}
+
+// Poll the local transactions table until status=APPROVED or max retries exhausted
+async function pollTransactionApproved(
+    reference: string,
+    maxRetries: number,
+    intervalMs: number
+): Promise<boolean> {
+    for (let i = 0; i < maxRetries; i++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        const { data } = await supabase
+            .from('transactions')
+            .select('status')
+            .eq('reference', reference)
+            .maybeSingle();
+        if (data?.status === 'APPROVED') return true;
+    }
+    return false;
 }
 
 export const WompiButton: React.FC<WompiButtonProps> = ({
@@ -28,84 +45,128 @@ export const WompiButton: React.FC<WompiButtonProps> = ({
 }) => {
     const [loading, setLoading] = useState(false);
 
+    const activateAfterPayment = async (reference: string) => {
+        const toastId = toast.loading('Verificando pago y activando tu plan...');
+
+        try {
+            // Primary path: call verify-and-activate-payment to confirm with Wompi API
+            const { data, error } = await supabase.functions.invoke('verify-and-activate-payment', {
+                body: { reference }
+            });
+
+            if (error) throw error;
+
+            // activated=false + alreadyActive=true means idempotent — already premium
+            if (data?.activated || data?.alreadyActive) {
+                toast.success('¡Plan activado! Recargando tu cuenta...', { id: toastId, duration: 3000, icon: '🎉' });
+                setTimeout(() => window.location.reload(), 1500);
+                return;
+            }
+
+            // Wompi returned non-APPROVED status
+            const wompiStatus = data?.wompiStatus;
+            if (wompiStatus && wompiStatus !== 'APPROVED') {
+                toast.dismiss(toastId);
+                if (wompiStatus === 'PENDING') {
+                    toast.loading('Pago pendiente. Te notificaremos cuando se confirme.', { duration: 6000 });
+                } else {
+                    toast.error(`El pago fue ${wompiStatus}. Si crees que es un error, contacta soporte.`);
+                }
+                setLoading(false);
+                return;
+            }
+
+            throw new Error('Respuesta inesperada del servidor');
+
+        } catch (primaryErr: any) {
+            console.warn('verify-and-activate-payment failed, falling back to polling:', primaryErr?.message);
+
+            // Fallback: poll the transactions table (webhook may still arrive)
+            toast.loading('Esperando confirmación del pago...', { id: toastId });
+            const approved = await pollTransactionApproved(reference, 8, 3000);
+
+            if (approved) {
+                toast.success('¡Plan activado! Recargando...', { id: toastId, duration: 3000, icon: '🎉' });
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                toast.dismiss(toastId);
+                toast.error(
+                    'Pago recibido pero la activación está pendiente. Recarga la página en unos minutos o contacta soporte.',
+                    { duration: 10000 }
+                );
+                setLoading(false);
+            }
+        }
+    };
+
     const handlePayment = async () => {
-        // Check if Wompi Widget is loaded
         if (!window.WidgetCheckout) {
             toast.error('El sistema de pagos no está disponible. Recarga la página.');
-            console.error('WidgetCheckout not loaded');
             return;
         }
 
         setLoading(true);
 
         try {
-            // 1. Create payment intent via Edge Function
+            // 1. Create payment intent and save pending transaction
             const { data, error } = await supabase.functions.invoke('create-payment-intent', {
                 body: {
                     planName,
                     userId,
                     includesInterview,
-                    finalAmountCents: finalPriceCOP * 100 // Convert COP to cents
+                    finalAmountCents: finalPriceCOP * 100
                 }
             });
 
-            if (error) {
-                console.error('Payment intent error:', error);
-                throw new Error(error.message || 'Error al crear la intención de pago');
-            }
-
-            if (data.error) {
-                throw new Error(data.error);
-            }
+            if (error) throw new Error(error.message || 'Error al crear la intención de pago');
+            if (data?.error) throw new Error(data.error);
 
             const { reference, amountInCents, integrity } = data;
 
-            console.log('Payment intent created:', { reference, amountInCents });
-
-            // 2. Get public key from environment
-            // @ts-ignore - Vite injects env vars at build time
+            // 2. Get public key
+            // @ts-ignore
             const publicKey = (import.meta as any).env?.VITE_WOMPI_PUBLIC_KEY || '';
+            if (!publicKey) throw new Error('Llave pública de Wompi no configurada');
 
-            if (!publicKey) {
-                throw new Error('Llave pública de Wompi no configurada');
-            }
+            // 3. Store reference in sessionStorage so PSE redirect can pick it up
+            // redirectUrl must match exactly what's whitelisted in Wompi — keep it as origin only
+            sessionStorage.setItem('wompi_pending_reference', reference);
 
-            // 3. Open Wompi Widget
             const checkout = new window.WidgetCheckout({
                 currency: 'COP',
-                amountInCents: amountInCents,
-                reference: reference,
-                publicKey: publicKey,
+                amountInCents,
+                reference,
+                publicKey,
                 signature: { integrity },
-                redirectUrl: window.location.origin, // Redirect to same page on success
+                redirectUrl: window.location.origin,
             });
 
-            // 4. Handle widget result
-            checkout.open((result: any) => {
-                console.log('Wompi result:', result);
+            // 4. Handle widget result (card payments close widget and fire this callback)
+            checkout.open(async (result: any) => {
+                console.log('Wompi widget result:', result);
 
-                if (result.transaction) {
-                    const status = result.transaction.status;
+                if (!result?.transaction) {
+                    setLoading(false);
+                    return;
+                }
 
-                    if (status === 'APPROVED') {
-                        toast.success('¡Pago exitoso! Tu cuenta Premium será activada en breve.', {
-                            duration: 5000,
-                            icon: '🎉'
-                        });
-                        setTimeout(() => window.location.reload(), 2000);
-                    } else if (status === 'PENDING') {
-                        toast.loading('Pago pendiente. Te notificaremos cuando se complete.', {
-                            duration: 5000
-                        });
-                    } else if (status === 'DECLINED') {
-                        toast.error('El pago fue rechazado.');
-                    } else {
-                        toast.error(`Estado del pago: ${status}`);
-                    }
+                const status = result.transaction.status;
+
+                if (status === 'APPROVED') {
+                    await activateAfterPayment(reference);
+                } else if (status === 'PENDING') {
+                    toast.loading('Pago pendiente. Te notificaremos cuando se confirme.', { duration: 6000 });
+                    setLoading(false);
+                } else if (status === 'DECLINED') {
+                    toast.error('El pago fue rechazado. Verifica los datos de tu tarjeta.');
+                    setLoading(false);
+                } else {
+                    toast.error(`Estado del pago: ${status}`);
+                    setLoading(false);
                 }
             });
 
-            // Release loading state immediately
+            // Release loading after widget opens
             setLoading(false);
 
         } catch (err: any) {

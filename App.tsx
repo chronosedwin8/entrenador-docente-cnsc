@@ -19,6 +19,7 @@ import { HelpVideosView } from './components/HelpVideosView';
 import { InterviewView } from './components/InterviewView';
 import { TermsModal } from './components/TermsModal';
 import { MaintenancePage } from './components/MaintenancePage';
+import { PaymentResult } from './components/PaymentResult';
 import { settingsService, MaintenanceConfig } from './services/settingsService';
 import { UserProfile, ExamConfig, Question, SimulationResult, AnswerRecord, UserRole, KnowledgeArea, SystemRole, SubscriptionTier } from './types';
 
@@ -61,6 +62,21 @@ const App: React.FC = () => {
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [showTerms, setShowTerms] = useState(false);
+  // Payment redirect detection (PSE and other bank redirect flows)
+  // Wompi redirects back to origin — we recover the reference from sessionStorage
+  const [pendingPaymentReference, setPendingPaymentReference] = useState<string | null>(() => {
+    // Also check URL param as fallback (in case Wompi adds id/env params)
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('payment_reference');
+    const fromStorage = sessionStorage.getItem('wompi_pending_reference');
+    // Only use sessionStorage if Wompi added its own redirect params (id or env)
+    const isWompiRedirect = params.has('id') || params.has('env') || fromUrl;
+    if (isWompiRedirect && fromStorage) {
+      sessionStorage.removeItem('wompi_pending_reference');
+      return fromStorage;
+    }
+    return fromUrl;
+  });
 
   // Check Session & Load History
   useEffect(() => {
@@ -557,7 +573,15 @@ const App: React.FC = () => {
   }
 
   return (
-    view === AppView.LANDING ? (
+    <>
+    {/* Payment result overlay for PSE / bank-redirect returns */}
+    {pendingPaymentReference && (
+      <PaymentResult
+        paymentReference={pendingPaymentReference}
+        onDone={() => setPendingPaymentReference(null)}
+      />
+    )}
+    {view === AppView.LANDING ? (
       <LandingPage onStart={() => {
         // If user is already logged in (profile exists), go to Config
         if (userProfile) {
@@ -725,7 +749,8 @@ const App: React.FC = () => {
           <TermsModal onAccept={handleTermsAccept} />
         )}
       </Layout>
-    )
+    )}
+    </>
   );
 };
 

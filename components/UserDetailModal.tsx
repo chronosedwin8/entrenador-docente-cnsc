@@ -1,5 +1,32 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
+import { supabase } from '../services/supabase';
 import { UserProfile, UserRole, SystemRole, SubscriptionTier, KnowledgeArea } from '../types';
+
+interface Transaction {
+    id: string;
+    plan_name: 'basico' | 'intermedio' | 'avanzado';
+    amount_in_cents: number;
+    currency: string;
+    status: string;
+    payment_method_type: string | null;
+    includes_interview: boolean;
+    created_at: string;
+    updated_at: string;
+}
+
+const PLAN_LABELS: Record<string, string> = {
+    basico: 'Básico',
+    intermedio: 'Intermedio',
+    avanzado: 'Avanzado'
+};
+
+const formatCOP = (cents: number, currency = 'COP') =>
+    new Intl.NumberFormat('es-CO', {
+        style: 'currency',
+        currency: currency || 'COP',
+        maximumFractionDigits: 0
+    }).format((cents || 0) / 100);
 
 interface UserDetailModalProps {
     user: UserProfile;
@@ -20,6 +47,75 @@ export const UserDetailModal: React.FC<UserDetailModalProps> = ({
     onResetInterview,
     onDeleteUser
 }) => {
+    const [newPassword, setNewPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [savingPassword, setSavingPassword] = useState(false);
+
+    // Historial de pagos (solo relevante para premium)
+    const [payments, setPayments] = useState<Transaction[]>([]);
+    const [loadingPayments, setLoadingPayments] = useState(false);
+
+    useEffect(() => {
+        if (user.subscription_tier !== 'premium') return;
+        let active = true;
+        (async () => {
+            setLoadingPayments(true);
+            const { data, error } = await supabase
+                .from('transactions')
+                .select('*')
+                .eq('user_id', user.id)
+                .eq('status', 'APPROVED')
+                .order('created_at', { ascending: false });
+            if (!active) return;
+            if (error) {
+                console.error('Error fetching transactions:', error);
+            } else {
+                setPayments((data as Transaction[]) || []);
+            }
+            setLoadingPayments(false);
+        })();
+        return () => { active = false; };
+    }, [user.id, user.subscription_tier]);
+
+    const handleSetPassword = async () => {
+        if (newPassword.trim().length < 6) {
+            toast.error('La contraseña debe tener al menos 6 caracteres.');
+            return;
+        }
+        if (!confirm(`¿Cambiar la contraseña de ${user.email || user.name}? El usuario deberá usar la nueva clave para iniciar sesión.`)) return;
+
+        setSavingPassword(true);
+        try {
+            const { error } = await supabase.rpc('admin_set_user_password', {
+                target_user_id: user.id,
+                new_password: newPassword.trim()
+            });
+            if (error) throw error;
+            toast.success('Contraseña actualizada correctamente.');
+            setNewPassword('');
+            setShowPassword(false);
+        } catch (error: any) {
+            console.error('Error setting password:', error);
+            toast.error(
+                error?.message?.includes('Unauthorized')
+                    ? 'No tienes permisos de administrador.'
+                    : (error?.message || 'Error al cambiar la contraseña.')
+            );
+        } finally {
+            setSavingPassword(false);
+        }
+    };
+
+    const generateRandomPassword = () => {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+        let pass = '';
+        const values = new Uint32Array(10);
+        crypto.getRandomValues(values);
+        for (let i = 0; i < 10; i++) pass += chars[values[i] % chars.length];
+        setNewPassword(pass);
+        setShowPassword(true);
+    };
+
     const formatDate = (dateStr?: string) => {
         if (!dateStr) return 'No registrada';
         const date = new Date(dateStr);
@@ -86,6 +182,66 @@ export const UserDetailModal: React.FC<UserDetailModalProps> = ({
                             </div>
                         </div>
                     </div>
+
+                    {/* Información de Pago (solo Premium) */}
+                    {user.subscription_tier === 'premium' && (
+                        <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
+                            <h3 className="font-bold text-amber-800 text-sm mb-3 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-lg">payments</span>
+                                Información de Pago
+                            </h3>
+
+                            {loadingPayments ? (
+                                <p className="text-sm text-amber-700">Cargando pagos...</p>
+                            ) : payments.length === 0 ? (
+                                <div className="text-sm text-amber-700 bg-amber-100/60 rounded-lg p-3">
+                                    <p className="font-bold">Sin registro de pago</p>
+                                    <p className="text-xs text-amber-600 mt-0.5">
+                                        Este usuario es Premium pero no tiene una transacción registrada
+                                        (probablemente activado manualmente o antes del registro de pagos).
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {payments.map((tx, idx) => (
+                                        <div
+                                            key={tx.id}
+                                            className={`rounded-lg p-3 border ${idx === 0 ? 'bg-white border-amber-200' : 'bg-amber-50/50 border-amber-100'}`}
+                                        >
+                                            {idx === 0 && payments.length > 1 && (
+                                                <span className="text-[10px] font-bold text-amber-600 uppercase">Último pago</span>
+                                            )}
+                                            <div className="grid grid-cols-2 gap-3 text-sm mt-1">
+                                                <div>
+                                                    <p className="text-amber-600 text-xs">Plan pagado</p>
+                                                    <p className="font-bold text-amber-900">
+                                                        {PLAN_LABELS[tx.plan_name] || tx.plan_name}
+                                                        {tx.includes_interview && (
+                                                            <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-bold align-middle">
+                                                                + Entrevista
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-amber-600 text-xs">Monto pagado</p>
+                                                    <p className="font-black text-green-700">{formatCOP(tx.amount_in_cents, tx.currency)}</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-amber-600 text-xs">Fecha de pago</p>
+                                                    <p className="font-bold text-amber-900">{formatDate(tx.updated_at || tx.created_at)}</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-amber-600 text-xs">Método</p>
+                                                    <p className="font-bold text-amber-900">{tx.payment_method_type || '—'}</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Editable Fields */}
                     <div className="space-y-4">
@@ -219,6 +375,56 @@ export const UserDetailModal: React.FC<UserDetailModalProps> = ({
                                         onBlur={(e) => onUpdate(user.id, { custom_question_limit: Number(e.target.value) })}
                                     />
                                 </div>
+                            </div>
+                        </div>
+
+                        {/* Cambiar Contraseña */}
+                        <div className="p-4 bg-rose-50 rounded-lg border border-rose-100">
+                            <h4 className="font-bold text-rose-800 text-sm mb-1 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-lg">key</span>
+                                Cambiar Contraseña
+                            </h4>
+                            <p className="text-[11px] text-rose-600/80 mb-3">
+                                Establece una nueva contraseña para este usuario (soporte para quienes la olvidaron).
+                                Deberás comunicársela para que inicie sesión.
+                            </p>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                                <div className="relative flex-1">
+                                    <input
+                                        type={showPassword ? 'text' : 'password'}
+                                        value={newPassword}
+                                        onChange={(e) => setNewPassword(e.target.value)}
+                                        placeholder="Nueva contraseña (mín. 6 caracteres)"
+                                        className="w-full p-2 pr-10 border border-rose-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-300"
+                                        autoComplete="new-password"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPassword(v => !v)}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                        title={showPassword ? 'Ocultar' : 'Mostrar'}
+                                    >
+                                        <span className="material-symbols-outlined text-lg">
+                                            {showPassword ? 'visibility_off' : 'visibility'}
+                                        </span>
+                                    </button>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={generateRandomPassword}
+                                    className="px-3 py-2 bg-white border border-rose-200 text-rose-600 rounded-lg text-sm font-bold hover:bg-rose-100 transition-colors whitespace-nowrap"
+                                    title="Generar una contraseña aleatoria"
+                                >
+                                    Generar
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSetPassword}
+                                    disabled={savingPassword || newPassword.trim().length < 6}
+                                    className="px-4 py-2 bg-rose-600 text-white rounded-lg text-sm font-bold hover:bg-rose-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                                >
+                                    {savingPassword ? 'Guardando...' : 'Cambiar'}
+                                </button>
                             </div>
                         </div>
                     </div>
