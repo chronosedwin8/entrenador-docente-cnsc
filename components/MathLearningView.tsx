@@ -2,8 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { YouTubeModal } from './YouTubeModal';
 import { supabase } from '../services/supabase';
 import { LearningVideo } from '../types';
+import { MathPracticeView } from './MathPracticeView';
 
-export const MathLearningView: React.FC = () => {
+interface MathLearningViewProps {
+    isPremium?: boolean;
+    onNavigateToPlans?: () => void;
+}
+
+export const MathLearningView: React.FC<MathLearningViewProps> = ({ isPremium = false, onNavigateToPlans }) => {
+    const [subTab, setSubTab] = useState<'videos' | 'exercises'>('videos');
     const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
     const [videos, setVideos] = useState<LearningVideo[]>([]);
     const [loading, setLoading] = useState(true);
@@ -37,23 +44,46 @@ export const MathLearningView: React.FC = () => {
                         Aprende Matemáticas
                     </h1>
                     <p className="text-slate-500 max-w-2xl">
-                        Domina el Razonamiento Cuantitativo con esta selección de videos especializados para el Concurso Docente.
+                        Domina el Razonamiento Cuantitativo con videos especializados y ejercicios de práctica generados por IA.
                     </p>
                 </div>
-                <a
-                    href="https://www.youtube.com/playlist?list=PLrkNalpcHIZBYxpEw5bxg0g7qc8GWk5gm"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-bold text-sm shadow-sm"
-                >
-                    <span className="material-symbols-outlined">playlist_play</span>
-                    Ver lista completa en YouTube
-                </a>
+                {subTab === 'videos' && (
+                    <a
+                        href="https://www.youtube.com/playlist?list=PLrkNalpcHIZBYxpEw5bxg0g7qc8GWk5gm"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-bold text-sm shadow-sm"
+                    >
+                        <span className="material-symbols-outlined">playlist_play</span>
+                        Ver lista completa en YouTube
+                    </a>
+                )}
             </div>
 
-            <div className="w-full h-px bg-slate-200"></div>
+            {/* Sub-pestañas */}
+            <div className="flex gap-2 border-b border-slate-200">
+                <button
+                    onClick={() => setSubTab('videos')}
+                    className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors flex items-center gap-1.5 ${subTab === 'videos' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                >
+                    <span className="material-symbols-outlined text-lg">smart_display</span>
+                    Videos
+                </button>
+                <button
+                    onClick={() => setSubTab('exercises')}
+                    className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors flex items-center gap-1.5 ${subTab === 'exercises' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                >
+                    <span className="material-symbols-outlined text-lg">auto_awesome</span>
+                    Ejercicios con IA
+                    {!isPremium && (
+                        <span className="ml-1 bg-amber-400 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">PREMIUM</span>
+                    )}
+                </button>
+            </div>
 
-            {loading ? (
+            {subTab === 'exercises' && <MathPracticeView isPremium={isPremium} onNavigateToPlans={onNavigateToPlans} />}
+
+            {subTab === 'videos' && (loading ? (
                 <div className="text-center p-10 text-slate-500">Cargando videos...</div>
             ) : videos.length === 0 ? (
                 <div className="text-center p-10 bg-slate-50 rounded-xl border border-dashed border-slate-300">
@@ -105,7 +135,7 @@ export const MathLearningView: React.FC = () => {
                         </div>
                     ))}
                 </div>
-            )}
+            ))}
 
             <YouTubeModal
                 isOpen={!!selectedVideo}

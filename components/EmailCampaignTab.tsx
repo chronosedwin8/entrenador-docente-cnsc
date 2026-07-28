@@ -244,6 +244,10 @@ export const EmailCampaignTab: React.FC = () => {
     const handleResumeCampaign = async (campaign: any) => {
         setResumingId(campaign.id);
         try {
+            if (!(await refreshSession())) {
+                toast.error('Tu sesión expiró. Cierra sesión y vuelve a ingresar.', { duration: 6000 });
+                return;
+            }
             await reconcileCampaign(campaign.id);
             const { error } = await supabase.functions.invoke('send-campaign', {
                 body: { campaignId: campaign.id }
@@ -295,6 +299,28 @@ export const EmailCampaignTab: React.FC = () => {
         }
     };
 
+    // Refresca el token de acceso antes de una operación pesada. Tras un rato
+    // en la misma página el JWT caduca y la puerta de enlace de Supabase
+    // rechaza la llamada con 401 ("sesión expirada"). Devuelve el usuario o null.
+    const refreshSession = async (): Promise<{ id: string } | null> => {
+        const { data, error } = await supabase.auth.refreshSession();
+        if (!error && data.session?.user) return data.session.user;
+        // Puede que el token siga vigente aunque el refresh no aplicara.
+        const { data: cur } = await supabase.auth.getSession();
+        return cur.session?.user ?? null;
+    };
+
+    const clearForm = () => {
+        setCampaignName('');
+        setSubject('');
+        setHtmlContent('');
+        setSelectedFilter('');
+        setFilterParams({});
+        setRecipientCount(0);
+        setRecipientEmails([]);
+        setInvalidEmailCount(0);
+    };
+
     const handleSendCampaign = async () => {
         if (!campaignName || !subject || !htmlContent || recipientCount === 0) {
             toast.error('Por favor completa todos los campos');
@@ -302,11 +328,15 @@ export const EmailCampaignTab: React.FC = () => {
         }
 
         setIsSending(true);
+        let campaignCreated = false;
 
         try {
-            // 1. Obtener usuario actual
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) throw new Error('No autenticado');
+            // 1. Refrescar sesión (el envío de miles es pesado y el token pudo caducar).
+            const user = await refreshSession();
+            if (!user) {
+                toast.error('Tu sesión expiró. Cierra sesión y vuelve a ingresar para enviar la campaña.', { duration: 7000 });
+                return;
+            }
 
             // 2. Crear campaña
             const { data: campaign, error: campaignError } = await supabase
@@ -325,8 +355,9 @@ export const EmailCampaignTab: React.FC = () => {
                 .single();
 
             if (campaignError) throw campaignError;
+            campaignCreated = true;
 
-            // 3. Crear registros de destinatarios
+            // 3. Crear registros de destinatarios por lotes.
             const recipients = recipientEmails.map(recipient => ({
                 campaign_id: campaign.id,
                 user_id: recipient.id,
@@ -334,8 +365,6 @@ export const EmailCampaignTab: React.FC = () => {
                 status: 'pending'
             }));
 
-            // Insertar por lotes: un insert único de miles de filas puede fallar
-            // o exceder límites de payload.
             const INSERT_CHUNK = 500;
             for (let i = 0; i < recipients.length; i += INSERT_CHUNK) {
                 const { error: recipientsError } = await supabase
@@ -344,36 +373,43 @@ export const EmailCampaignTab: React.FC = () => {
                 if (recipientsError) throw recipientsError;
             }
 
-            // 4. Llamar Edge Function para enviar
+            // 4. Arrancar el envío. Este invoke NO es crítico: la campaña ya está
+            //    guardada con sus destinatarios, así que aunque falle (token, timeout
+            //    del primer lote...) se puede continuar con "Reanudar". Por eso no
+            //    lanzamos error: informamos y dejamos la campaña lista.
             const { error: sendError } = await supabase.functions.invoke('send-campaign', {
                 body: { campaignId: campaign.id }
             });
 
-            if (sendError) throw sendError;
+            if (sendError) {
+                console.error('Invoke send-campaign falló (la campaña sí se guardó):', sendError);
+                toast('La campaña se creó con sus ' + recipientCount + ' destinatarios. Si no arranca sola en unos segundos, pulsa "Reanudar" en la lista →', {
+                    icon: '⏳',
+                    duration: 9000
+                });
+            } else {
+                toast.success(
+                    `Campaña iniciada: enviando a ${recipientCount} usuarios en segundo plano. El progreso se actualiza solo abajo.`,
+                    { duration: 6000 }
+                );
+            }
 
-            toast.success(
-                `Campaña iniciada: enviando a ${recipientCount} usuarios en segundo plano. El progreso se actualiza solo abajo.`,
-                { duration: 6000 }
-            );
-
-            // Limpiar formulario
-            setCampaignName('');
-            setSubject('');
-            setHtmlContent('');
-            setSelectedFilter('');
-            setFilterParams({});
-            setRecipientCount(0);
-            setRecipientEmails([]);
-
+            clearForm();
             fetchCampaigns();
         } catch (error: any) {
             console.error('Error sending campaign:', error);
-
-            // Detección específica de error de sesión (401)
-            if (error.message?.includes('non-2xx') || error.message?.includes('401') || error.message?.includes('Unauthorized')) {
-                toast.error('Tu sesión ha expirado. Por favor cierra sesión y vuelve a ingresar.', { duration: 5000 });
+            if (campaignCreated) {
+                // La campaña quedó guardada: nunca digas que no se envió nada.
+                toast('La campaña se guardó pero hubo un problema al preparar el envío. Búscala en la lista y pulsa "Reanudar".', {
+                    icon: '⚠️',
+                    duration: 9000
+                });
+                clearForm();
+                fetchCampaigns();
+            } else if (error.message?.includes('401') || error.message?.includes('Unauthorized') || error.message?.includes('JWT')) {
+                toast.error('Tu sesión expiró. Cierra sesión y vuelve a ingresar.', { duration: 6000 });
             } else {
-                toast.error('Error enviando campaña: ' + error.message);
+                toast.error('Error creando la campaña: ' + error.message);
             }
         } finally {
             setIsSending(false);
@@ -406,6 +442,10 @@ export const EmailCampaignTab: React.FC = () => {
         if (!confirm(`¿Reintentar el envío de los ${campaign.failed_sends} correos fallidos de "${campaign.name}"?`)) return;
         setRetryingId(campaign.id);
         try {
+            if (!(await refreshSession())) {
+                toast.error('Tu sesión expiró. Cierra sesión y vuelve a ingresar.', { duration: 6000 });
+                return;
+            }
             const { error: resetError } = await supabase
                 .from('email_recipients')
                 .update({ status: 'pending', error_message: null })
@@ -768,7 +808,11 @@ export const EmailCampaignTab: React.FC = () => {
                             const secondsSinceActivity = lastActivity
                                 ? (Date.now() - new Date(lastActivity).getTime()) / 1000
                                 : Infinity;
-                            const stalled = pending > 0 && secondsSinceActivity > 120;
+                            // "Nunca arrancó": sigue en 'scheduled' sin procesar nada.
+                            // Damos 20s de gracia para que el primer invoke cambie el estado.
+                            const neverStarted = campaign.status === 'scheduled' && processed === 0 && secondsSinceActivity > 20;
+                            // Detenido: sin avance por >2 min, o nunca arrancó.
+                            const stalled = pending > 0 && (neverStarted || secondsSinceActivity > 120);
 
                             const statusLabel =
                                 campaign.status === 'sent' ? 'Completada' :

@@ -694,7 +694,10 @@ const App: React.FC = () => {
         )}
 
         {view === AppView.PLANS && <PlansView userId={userProfile?.id} />}
-        {view === AppView.MATH_LEARNING && <MathLearningView />}
+        {view === AppView.MATH_LEARNING && <MathLearningView
+          isPremium={userProfile?.subscription_tier === 'premium' || userProfile?.system_role === 'admin'}
+          onNavigateToPlans={() => handleNavigate('planes')}
+        />}
         {view === AppView.HELP_VIDEOS && <HelpVideosView />}
         {view === AppView.AI_ANALYSIS && userProfile && (
           <AIAnalysisView

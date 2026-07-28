@@ -18,6 +18,8 @@ interface Transaction {
     includes_interview: boolean;
     created_at: string;
     updated_at: string;
+    email?: string;
+    name?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -59,37 +61,76 @@ const MONTH_LABELS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'S
 export const RevenueTab: React.FC = () => {
     const [transactions, setTransactions] = useState<Transaction[]>([]);
     const [loading, setLoading] = useState(true);
+    const [showManage, setShowManage] = useState(false);
+    const [manageSearch, setManageSearch] = useState('');
+    const [refundingId, setRefundingId] = useState<string | null>(null);
 
-    useEffect(() => {
-        (async () => {
-            setLoading(true);
-            try {
-                // Traer TODAS las transacciones aprobadas (paginado por si son muchas).
-                const PAGE = 1000;
-                let all: Transaction[] = [];
-                let from = 0;
-                while (true) {
-                    const { data, error } = await supabase
-                        .from('transactions')
-                        .select('*')
-                        .eq('status', 'APPROVED')
-                        .order('created_at', { ascending: true })
-                        .range(from, from + PAGE - 1);
-                    if (error) throw error;
-                    if (!data || data.length === 0) break;
-                    all = all.concat(data as Transaction[]);
-                    if (data.length < PAGE) break;
-                    from += PAGE;
-                }
-                setTransactions(all);
-            } catch (error: any) {
-                console.error('Error cargando transacciones:', error);
-                toast.error('Error cargando ingresos.');
-            } finally {
-                setLoading(false);
+    const load = async () => {
+        setLoading(true);
+        try {
+            // Traer transacciones APROBADAS y REEMBOLSADAS (paginado por si son muchas).
+            // Las reembolsadas se muestran pero NO cuentan como ingreso.
+            const PAGE = 1000;
+            let all: Transaction[] = [];
+            let from = 0;
+            while (true) {
+                const { data, error } = await supabase
+                    .from('transactions')
+                    .select('*')
+                    .in('status', ['APPROVED', 'REFUNDED'])
+                    .order('created_at', { ascending: true })
+                    .range(from, from + PAGE - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                all = all.concat(data as Transaction[]);
+                if (data.length < PAGE) break;
+                from += PAGE;
             }
-        })();
-    }, []);
+
+            // Traer el correo/nombre de los usuarios involucrados para identificarlos.
+            const userIds = [...new Set(all.map(t => t.user_id))];
+            const emailById: Record<string, { email?: string; name?: string }> = {};
+            for (let i = 0; i < userIds.length; i += 300) {
+                const { data: profs } = await supabase
+                    .from('profiles')
+                    .select('id, email, name')
+                    .in('id', userIds.slice(i, i + 300));
+                (profs || []).forEach((p: any) => { emailById[p.id] = { email: p.email, name: p.name }; });
+            }
+            all = all.map(t => ({ ...t, email: emailById[t.user_id]?.email, name: emailById[t.user_id]?.name }));
+
+            setTransactions(all);
+        } catch (error: any) {
+            console.error('Error cargando transacciones:', error);
+            toast.error('Error cargando ingresos.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => { load(); }, []);
+
+    const handleRefund = async (tx: Transaction, refunded: boolean) => {
+        const verb = refunded ? 'marcar como REEMBOLSADA' : 'restaurar como ingreso';
+        if (!confirm(`¿Seguro que deseas ${verb} la compra de ${tx.email || tx.user_id} por ${formatCOP((tx.amount_in_cents || 0) / 100)}?`)) return;
+        setRefundingId(tx.id);
+        try {
+            const { error } = await supabase.rpc('set_transaction_refunded', {
+                p_transaction_id: tx.id,
+                p_refunded: refunded
+            });
+            if (error) throw error;
+            toast.success(refunded ? 'Transacción marcada como reembolsada.' : 'Transacción restaurada.');
+            await load();
+        } catch (error: any) {
+            console.error('Error actualizando reembolso:', error);
+            toast.error(error?.message?.includes('Unauthorized')
+                ? 'No tienes permisos de administrador.'
+                : 'Error al actualizar la transacción.');
+        } finally {
+            setRefundingId(null);
+        }
+    };
 
     const metrics = useMemo(() => {
         let gross = 0;
@@ -102,7 +143,20 @@ export const RevenueTab: React.FC = () => {
         };
         const byMonth: Record<string, { gross: number; net: number; count: number }> = {};
 
+        // Reembolsos: se muestran aparte y NO cuentan como ingreso.
+        let refundedCount = 0;
+        let refundedGross = 0;
         for (const tx of transactions) {
+            if (tx.status === 'REFUNDED') {
+                refundedCount++;
+                refundedGross += (tx.amount_in_cents || 0) / 100;
+            }
+        }
+
+        // Solo las APROBADAS suman ingresos.
+        const approved = transactions.filter(t => t.status === 'APPROVED');
+
+        for (const tx of approved) {
             const pesos = (tx.amount_in_cents || 0) / 100;
             const fee = wompiFee(pesos);
             const net = pesos - fee;
@@ -150,10 +204,12 @@ export const RevenueTab: React.FC = () => {
             gross,
             fees,
             net: gross - fees,
-            count: transactions.length,
+            count: approved.length,
             payingUsers: payingUsers.size,
             planRows,
-            monthly
+            monthly,
+            refundedCount,
+            refundedGross
         };
     }, [transactions]);
 
@@ -175,6 +231,27 @@ export const RevenueTab: React.FC = () => {
 
     return (
         <div className="overflow-y-auto pb-6">
+            {/* Barra superior: gestión de transacciones/reembolsos */}
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                <div className="text-sm text-slate-500">
+                    {metrics.refundedCount > 0 ? (
+                        <span className="inline-flex items-center gap-1.5 bg-rose-50 text-rose-700 border border-rose-200 px-3 py-1.5 rounded-lg font-bold">
+                            <span className="material-symbols-outlined text-base">undo</span>
+                            {metrics.refundedCount} reembolso{metrics.refundedCount > 1 ? 's' : ''} excluido{metrics.refundedCount > 1 ? 's' : ''} ({formatCOP(metrics.refundedGross)})
+                        </span>
+                    ) : (
+                        <span className="text-slate-400">Sin reembolsos registrados.</span>
+                    )}
+                </div>
+                <button
+                    onClick={() => setShowManage(true)}
+                    className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-bold hover:bg-slate-50 transition-colors flex items-center gap-2"
+                >
+                    <span className="material-symbols-outlined text-lg">receipt_long</span>
+                    Gestionar transacciones / Reembolsos
+                </button>
+            </div>
+
             {/* Tarjetas de resumen */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <div className="bg-white p-5 rounded-xl border border-border-light shadow-sm">
@@ -323,6 +400,117 @@ export const RevenueTab: React.FC = () => {
                 * El neto es una estimación aplicando la comisión de Wompi (2.65% + $700 + IVA) a cada transacción exitosa.
                 No incluye retenciones tributarias ni otros descuentos que tu banco/adquirente pueda aplicar.
             </p>
+
+            {/* MODAL: Gestionar transacciones / reembolsos */}
+            {showManage && (
+                <div
+                    className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                    onClick={() => setShowManage(false)}
+                >
+                    <div
+                        className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="p-5 border-b border-slate-100 flex items-start justify-between">
+                            <div>
+                                <h3 className="text-lg font-black text-[#0d141c]">Transacciones y Reembolsos</h3>
+                                <p className="text-sm text-slate-500 mt-0.5">
+                                    Marca una compra como reembolsada para que deje de sumar en los ingresos.
+                                </p>
+                            </div>
+                            <button onClick={() => setShowManage(false)} className="p-2 hover:bg-slate-100 rounded-full">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="p-4 border-b border-slate-100">
+                            <div className="relative">
+                                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">search</span>
+                                <input
+                                    type="text"
+                                    placeholder="Buscar por correo, nombre o plan..."
+                                    className="w-full pl-10 pr-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                                    value={manageSearch}
+                                    onChange={(e) => setManageSearch(e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="overflow-y-auto flex-1">
+                            <table className="w-full text-left text-sm">
+                                <thead className="bg-slate-50 text-slate-500 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="p-3">Usuario</th>
+                                        <th className="p-3">Plan</th>
+                                        <th className="p-3 text-right">Monto</th>
+                                        <th className="p-3">Fecha</th>
+                                        <th className="p-3 text-center">Estado</th>
+                                        <th className="p-3 text-right">Acción</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {[...transactions]
+                                        .filter(tx => {
+                                            const t = manageSearch.trim().toLowerCase();
+                                            if (!t) return true;
+                                            return (
+                                                tx.email?.toLowerCase().includes(t) ||
+                                                tx.name?.toLowerCase().includes(t) ||
+                                                (PLAN_LABELS[tx.plan_name] || tx.plan_name).toLowerCase().includes(t)
+                                            );
+                                        })
+                                        .sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime())
+                                        .map(tx => {
+                                            const refunded = tx.status === 'REFUNDED';
+                                            return (
+                                                <tr key={tx.id} className={`hover:bg-slate-50 ${refunded ? 'bg-rose-50/40' : ''}`}>
+                                                    <td className="p-3">
+                                                        <div className="font-bold text-[#0d141c] max-w-[220px] truncate" title={tx.email}>{tx.email || '—'}</div>
+                                                        <div className="text-xs text-slate-400">{tx.name || tx.user_id.substring(0, 8)}</div>
+                                                    </td>
+                                                    <td className="p-3">{PLAN_LABELS[tx.plan_name] || tx.plan_name}</td>
+                                                    <td className="p-3 text-right font-bold">{formatCOP((tx.amount_in_cents || 0) / 100)}</td>
+                                                    <td className="p-3 text-slate-500">
+                                                        {new Date(tx.updated_at || tx.created_at).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                                    </td>
+                                                    <td className="p-3 text-center">
+                                                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${refunded ? 'bg-rose-100 text-rose-700' : 'bg-green-100 text-green-700'}`}>
+                                                            {refunded ? 'Reembolsada' : 'Ingreso'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="p-3 text-right">
+                                                        {refunded ? (
+                                                            <button
+                                                                onClick={() => handleRefund(tx, false)}
+                                                                disabled={refundingId === tx.id}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                                                            >
+                                                                {refundingId === tx.id ? '...' : 'Restaurar'}
+                                                            </button>
+                                                        ) : (
+                                                            <button
+                                                                onClick={() => handleRefund(tx, true)}
+                                                                disabled={refundingId === tx.id}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50"
+                                                            >
+                                                                {refundingId === tx.id ? '...' : 'Marcar reembolso'}
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div className="p-4 border-t border-slate-100 bg-amber-50 text-xs text-amber-800">
+                            💡 Marcar un reembolso solo lo excluye del reporte de ingresos. Si además quieres quitarle el
+                            plan Premium al usuario, hazlo en <strong>Usuarios y Métricas → Ver Detalles</strong>.
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

@@ -99,6 +99,46 @@ export const fetchQuestionBatch = async (
   throw new Error("No se pudo conectar con el servicio después de varios intentos.");
 };
 
+export interface MathExercise {
+  statement: string;
+  options: string[];
+  answer: string;
+  solution: string;
+}
+
+export const generateMathExercises = async (
+  topic: string,
+  topicLabel: string,
+  difficulty: string,
+  count = 10
+): Promise<MathExercise[]> => {
+  const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError || !session) {
+    throw new Error('No hay sesión activa. Por favor recarga la página.');
+  }
+
+  const { data, error } = await supabase.functions.invoke('generate-math-exercises', {
+    body: { topic, topicLabel, difficulty, count },
+    headers: { Authorization: `Bearer ${session.access_token}` }
+  });
+
+  if (error) {
+    // Intentar leer el mensaje real de la Edge Function.
+    let backendMessage = '';
+    try {
+      const body = await error.context?.json?.();
+      backendMessage = body?.error || '';
+    } catch { /* cuerpo no legible */ }
+    throw new Error(backendMessage || error.message || 'Error generando ejercicios.');
+  }
+
+  const exercises = data?.exercises;
+  if (!Array.isArray(exercises) || exercises.length === 0) {
+    throw new Error('No se recibieron ejercicios. Intenta de nuevo.');
+  }
+  return exercises as MathExercise[];
+};
+
 export const consultNormativeExpert = async (query: string, contextLaw?: string): Promise<string> => {
   try {
     // Get current session token for authentication
@@ -137,13 +177,25 @@ export const consultNormativeExpert = async (query: string, contextLaw?: string)
       if (error.context?.status === 401) {
         return "Error de autenticación. Intenta cerrar sesión y volver a ingresar.";
       }
+
+      // Intentar extraer el mensaje real que devolvió la Edge Function.
+      let backendMessage = '';
+      try {
+        const body = await error.context?.json?.();
+        backendMessage = body?.error || '';
+      } catch { /* el cuerpo no era JSON legible */ }
+
+      if (backendMessage) {
+        console.error("consult-expert backend message:", backendMessage);
+        return `El asistente no pudo responder: ${backendMessage}`;
+      }
       throw error;
     }
 
     return data?.text || "No se pudo obtener respuesta.";
-  } catch (err) {
+  } catch (err: any) {
     console.error("consultNormativeExpert failed:", err);
-    return "Servicio no disponible momentáneamente.";
+    return "Servicio no disponible momentáneamente. (" + (err?.message || 'error desconocido') + ")";
   }
 };
 
