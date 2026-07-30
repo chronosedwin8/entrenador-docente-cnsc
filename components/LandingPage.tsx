@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { FAQSection } from './FAQSection';
 import { VideoSection } from './VideoSection';
 import { GallerySection } from './GallerySection';
+import { RefundPolicyModal } from './RefundPolicyModal';
 import { settingsService, PlanConfigs, InterviewPricingConfig } from '../services/settingsService';
 
 interface LandingPageProps {
@@ -10,6 +11,7 @@ interface LandingPageProps {
 
 export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
     const [isVisible, setIsVisible] = useState(false);
+    const [showRefundPolicy, setShowRefundPolicy] = useState(false);
     const [plans, setPlans] = useState<PlanConfigs | null>(null);
     const [pricingConfig, setPricingConfig] = useState<InterviewPricingConfig | null>(null);
     const [isInterviewEnabled, setIsInterviewEnabled] = useState(false);
@@ -522,11 +524,39 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
                         </a>
                     </div>
 
+                    {/* Nota destacada + enlace a política de devoluciones */}
+                    <div className="max-w-2xl mx-auto mb-8">
+                        <div className="bg-white/5 border border-white/10 rounded-xl p-5 text-left">
+                            <p className="text-slate-300 text-sm leading-relaxed">
+                                <span className="text-green-400 font-bold">✔ Prueba gratis por un año.</span> Conoce la
+                                plataforma con la versión gratuita antes de pagar. Al suscribirte a un plan Premium
+                                <strong className="text-white"> aceptas las condiciones del simulador y su contenido</strong>.
+                                Si decides pagar sin haber probado antes la plataforma, lo asumes bajo esas condiciones y,
+                                una vez activado el plan, <strong className="text-white">no se realizan devoluciones de dinero</strong>.
+                            </p>
+                            <button
+                                onClick={() => setShowRefundPolicy(true)}
+                                className="mt-3 inline-flex items-center gap-1.5 text-primary hover:text-blue-400 font-bold text-sm transition-colors"
+                            >
+                                <span className="material-symbols-outlined text-base">receipt_long</span>
+                                Ver Política de Devoluciones
+                            </button>
+                        </div>
+                    </div>
+
                     <div className="flex flex-col gap-2">
                         <p className="text-slate-500 text-sm">© 2026 Entrenador Docente CNSC. Todos los derechos reservados.</p>
                         <p className="text-slate-700 text-xs">Diseñado para el éxito del Magisterio.</p>
+                        <button
+                            onClick={() => setShowRefundPolicy(true)}
+                            className="text-slate-500 hover:text-slate-300 text-xs underline transition-colors mx-auto"
+                        >
+                            Política de Devoluciones
+                        </button>
                     </div>
                 </footer>
+
+                {showRefundPolicy && <RefundPolicyModal onClose={() => setShowRefundPolicy(false)} />}
 
                 {/* WhatsApp Floating Button */}
                 <a

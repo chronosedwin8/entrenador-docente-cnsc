@@ -39,6 +39,15 @@ export const TermsModal: React.FC<TermsModalProps> = ({ onAccept }) => {
                     <p>
                         El uso de esta plataforma implica la aceptación plena de este descargo de responsabilidad.
                     </p>
+
+                    {/* Nota destacada: devoluciones */}
+                    <div className="p-3 bg-amber-50 border-l-4 border-amber-400 rounded-r-lg">
+                        <p className="text-amber-900 text-sm">
+                            <span className="font-bold">💳 Devoluciones:</span> hay <strong>versión gratuita por un año</strong> para
+                            probar. Al pagar un plan aceptas las condiciones del simulador y, una vez activado,
+                            <strong> no hay devolución del dinero</strong> (salvo error de cobro o falla técnica de la plataforma).
+                        </p>
+                    </div>
                 </div>
 
                 {/* Footer */}

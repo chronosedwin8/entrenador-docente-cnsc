@@ -89,6 +89,28 @@ export const FAQSection: React.FC = () => {
         {
             question: "¿El contenido sirve para el examen de Rectores y Coordinadores?",
             answer: "Sí, contamos con simulacros específicos que evalúan la gestión directiva según la normativa vigente de la CNSC."
+        },
+        {
+            question: "¿Hacen devoluciones del dinero si pago un plan Premium?",
+            answer: (
+                <>
+                    <p className="mb-2">
+                        Contamos con una <strong>versión gratuita disponible por un año</strong> para que conozcas la
+                        plataforma y su contenido antes de pagar. Por eso te recomendamos probarla y tomar una decisión informada.
+                    </p>
+                    <p className="mb-2">
+                        Al pagar un plan Premium <strong>aceptas las condiciones del simulador y su contenido</strong>, y el
+                        servicio se activa de inmediato. Debido a esto, <strong>una vez activado el plan no se realizan
+                        devoluciones del dinero</strong>. Si decides pagar sin haber probado antes la versión gratuita, lo
+                        asumes bajo estas mismas condiciones.
+                    </p>
+                    <p>
+                        Solo se estudian devoluciones en casos de error de cobro, cobro duplicado, falla técnica atribuible a
+                        la plataforma o cuando la ley colombiana lo exija. Cancelar la suscripción evita futuros cobros, pero no
+                        devuelve el período ya iniciado.
+                    </p>
+                </>
+            )
         }
     ];
 

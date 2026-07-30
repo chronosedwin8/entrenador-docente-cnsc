@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { settingsService, PlanConfigs, InterviewPricingConfig } from '../services/settingsService';
 import { WompiButton } from './WompiButton';
+import { RefundPolicyModal } from './RefundPolicyModal';
 
 interface PlansViewProps {
     userId?: string; // User ID for payment processing
@@ -10,6 +11,7 @@ export const PlansView: React.FC<PlansViewProps> = ({ userId }) => {
     const [plans, setPlans] = useState<PlanConfigs | null>(null);
     const [pricingConfig, setPricingConfig] = useState<InterviewPricingConfig | null>(null);
     const [isInterviewEnabled, setIsInterviewEnabled] = useState(false);
+    const [showRefundPolicy, setShowRefundPolicy] = useState(false);
 
     useEffect(() => {
         const loadSettings = async () => {
@@ -213,6 +215,24 @@ export const PlansView: React.FC<PlansViewProps> = ({ userId }) => {
                     ))}
                 </div>
 
+                {/* Nota de devoluciones destacada */}
+                <div className="mt-10 max-w-3xl mx-auto">
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center">
+                        <p className="text-sm text-amber-900">
+                            <span className="font-bold">Antes de pagar:</span> hay <strong>versión gratuita por un año</strong> para
+                            conocer la plataforma. Al suscribirte aceptas las condiciones del simulador y su contenido; una vez
+                            activado el plan <strong>no se realizan devoluciones</strong> (salvo error de cobro o falla técnica atribuible a la plataforma).
+                        </p>
+                        <button
+                            onClick={() => setShowRefundPolicy(true)}
+                            className="mt-2 inline-flex items-center gap-1.5 text-primary hover:text-blue-700 font-bold text-sm transition-colors"
+                        >
+                            <span className="material-symbols-outlined text-base">receipt_long</span>
+                            Ver Política de Devoluciones
+                        </button>
+                    </div>
+                </div>
+
                 {/* Security badges */}
                 <div className="mt-12 text-center">
                     <p className="text-xs text-slate-400 mb-4">Pago seguro procesado por</p>
@@ -223,6 +243,8 @@ export const PlansView: React.FC<PlansViewProps> = ({ userId }) => {
                     </div>
                 </div>
             </div>
+
+            {showRefundPolicy && <RefundPolicyModal onClose={() => setShowRefundPolicy(false)} />}
         </div>
     );
 };
