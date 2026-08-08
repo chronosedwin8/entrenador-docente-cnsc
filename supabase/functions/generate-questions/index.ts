@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 
-console.log("Edge Function: generate-questions v3.0 (Cache + Bloom + Full Audit)");
+console.log("Edge Function: generate-questions v3.1 (fix idioma Inglés: solo Conocimientos Específicos en inglés)");
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -280,6 +280,12 @@ async function fetchFromCache(
 
     if (competency) {
       query = query.eq('competency', competency);
+    } else if (area === 'Idioma Extranjero Inglés') {
+      // Simulacro mixto/diagnóstico para docentes de Inglés: las preguntas de
+      // 'Conocimientos Específicos' están en inglés. Si no se excluyen, el
+      // simulacro mixto saldría íntegramente en inglés (es el único contenido
+      // cacheado de esa área). Los simulacros mixtos van en español.
+      query = query.or('competency.is.null,competency.neq."Conocimientos Específicos"');
     }
 
     // Get random questions using order and limit
@@ -395,23 +401,58 @@ Deno.serve(async (req) => {
     // C. Handle Competency Switching
     let promptMode = "MODO ESTÁNDAR: Preguntas de juicio situacional con base legal y pedagógica.";
 
+    // Detecta si la competencia es la DISCIPLINAR ("Conocimientos Específicos"),
+    // que es la única que debe generarse en inglés para el área de Inglés.
+    // OJO: la comparación debe ser tolerante a acentos/mayúsculas. El bug previo
+    // comparaba contra 'Pedagógica' exacto, pero el valor real del enum es
+    // 'Competencias Pedagógicas', por lo que las preguntas pedagógicas caían en
+    // la rama disciplinar y salían en inglés.
+    const normalize = (s: string) =>
+      s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+    const c = competency ? normalize(competency) : '';
+    const isPedagogical = c.includes('pedagog');
+    const isDisciplinar = c.includes('especifico') || c.includes('disciplinar');
+    const isEnglishArea = area === 'Idioma Extranjero Inglés';
+
     if (competency) {
-      if (competency.includes("Cuantitativo")) {
+      if (c.includes("cuantitativo")) {
         promptMode = COMPETENCY_OVERRIDES['Razonamiento Cuantitativo'];
-      } else if (competency.includes("Psicotécnica")) {
+      } else if (c.includes("psicotecnica")) {
         promptMode = COMPETENCY_OVERRIDES['Prueba Psicotécnica'];
-      } else if (competency.includes("Comportamental")) {
+      } else if (c.includes("comportamental")) {
         promptMode = COMPETENCY_OVERRIDES['Competencias Comportamentales'];
-      } else if (competency.includes("Lectura")) {
+      } else if (c.includes("lectura")) {
         promptMode = COMPETENCY_OVERRIDES['Lectura Crítica'];
-      } else if (competency.includes("Específico") || (area && area !== 'N/A' && competency !== 'Pedagógica')) {
-        if (area === 'Idioma Extranjero Inglés') {
+      } else if (isDisciplinar || (area && area !== 'N/A' && !isPedagogical)) {
+        // El modo inglés exige AMBAS condiciones: área de Inglés Y competencia
+        // disciplinar. Así el promptMode nunca contradice a LANGUAGE_RULE.
+        if (isEnglishArea && isDisciplinar) {
           promptMode = COMPETENCY_OVERRIDES['Conocimientos Específicos - Inglés'];
         } else {
           promptMode = COMPETENCY_OVERRIDES['Conocimientos Específicos'].replace('{{AREA}}', area || 'General');
         }
       }
     }
+
+    // Regla de idioma explícita: el inglés SOLO aplica a Conocimientos Específicos
+    // del área de Inglés. Todo lo demás (lectura crítica, cuantitativo, pedagógicas,
+    // psicotécnica, comportamentales y el simulacro mixto) va en español.
+    const englishOnlyForDisciplinar = isEnglishArea && isDisciplinar;
+
+    console.log(
+      `[IDIOMA] area="${area}" competency="${competency}" ` +
+      `isEnglishArea=${isEnglishArea} isDisciplinar=${isDisciplinar} isPedagogical=${isPedagogical} ` +
+      `=> ${englishOnlyForDisciplinar ? 'INGLÉS' : 'ESPAÑOL'}`
+    );
+    const LANGUAGE_RULE = englishOnlyForDisciplinar
+      ? `--- IDIOMA (OBLIGATORIO) ---
+      Genera TODO el contenido en INGLÉS (enunciados, contexto, opciones y explicaciones),
+      ya que corresponde a la prueba de Conocimientos Específicos del área de Idioma Extranjero Inglés.`
+      : `--- IDIOMA (OBLIGATORIO) ---
+      Genera TODO el contenido ÚNICAMENTE en ESPAÑOL (enunciados, contexto, opciones y explicaciones).
+      Aunque el docente pertenezca al área de Idioma Extranjero Inglés, esta prueba NO es de
+      Conocimientos Específicos, por lo tanto NO debe redactarse en inglés bajo ninguna circunstancia.`;
 
     // 7. Final Super Prompt Assembly (v3.0 - Full Audit Implementation)
     const finalPrompt = `
@@ -430,6 +471,8 @@ Deno.serve(async (req) => {
       
       --- MODO DE OPERACIÓN: ${competency || 'General'} ---
       ${promptMode}
+
+      ${LANGUAGE_RULE}
 
       --- REGLAS ABSOLUTAS DE DIFICULTAD (ANTI-FACILISMO) ---
       1. PROHIBICIÓN DE "OPCIONES DESCARTABLES":
